@@ -48,32 +48,17 @@ def wgs84_to_gcj02(lng, lat):
     return mglng, mglat
 
 def gcj02_to_wgs84(lng, lat):
-    """火星坐标系 (GCJ-02) 转 WGS-84 (近似，精度约1-2米)"""
-    a = 6378245.0
-    ee = 0.00669342162296594323
-    def transform_lat(x, y):
-        ret = -100.0 + 2.0 * x + 3.0 * y + 0.2 * y * y + 0.1 * x * y + 0.2 * abs(x)
-        ret += (20.0 * sin(6.0 * x * pi) + 20.0 * sin(2.0 * x * pi)) * 2.0 / 3.0
-        ret += (20.0 * sin(y * pi) + 40.0 * sin(y / 3.0 * pi)) * 2.0 / 3.0
-        ret += (160.0 * sin(y / 12.0 * pi) + 320 * sin(y * pi / 30.0)) * 2.0 / 3.0
-        return ret
-    def transform_lng(x, y):
-        ret = 300.0 + x + 2.0 * y + 0.1 * x * x + 0.1 * x * y + 0.1 * abs(x)
-        ret += (20.0 * sin(6.0 * x * pi) + 20.0 * sin(2.0 * x * pi)) * 2.0 / 3.0
-        ret += (20.0 * sin(x * pi) + 40.0 * sin(x / 3.0 * pi)) * 2.0 / 3.0
-        ret += (150.0 * sin(x / 12.0 * pi) + 300.0 * sin(x / 30.0 * pi)) * 2.0 / 3.0
-        return ret
-    dlat = transform_lat(lng - 105.0, lat - 35.0)
-    dlng = transform_lng(lng - 105.0, lat - 35.0)
-    radlat = lat / 180.0 * pi
-    magic = sin(radlat)
-    magic = 1 - ee * magic * magic
-    sqrtmagic = sqrt(magic)
-    dlat = (dlat * 180.0) / ((a * (1 - ee)) / (magic * sqrtmagic) * pi)
-    dlng = (dlng * 180.0) / (a / sqrtmagic * cos(radlat) * pi)
-    wgs_lat = lat - dlat
-    wgs_lng = lng - dlng
-    return wgs_lng, wgs_lat
+    """GCJ-02 → WGS-84 迭代法（足够精度）"""
+    lng_wgs, lat_wgs = lng, lat
+    for _ in range(5):
+        lng_gcj, lat_gcj = wgs84_to_gcj02(lng_wgs, lat_wgs)
+        delta_lng = lng_gcj - lng
+        delta_lat = lat_gcj - lat
+        lng_wgs -= delta_lng
+        lat_wgs -= delta_lat
+        if abs(delta_lng) < 1e-7 and abs(delta_lat) < 1e-7:
+            break
+    return lng_wgs, lat_wgs
 
 def haversine(lon1, lat1, lon2, lat2):
     R = 6371
@@ -364,13 +349,13 @@ class CommunicationLogger:
 # ==================== 飞行监控模拟器 ====================
 class FlightSimulator:
     def __init__(self, waypoints, speed_mps=8.5, battery_reserve_percent=80, logger=None):
-        self.waypoints = waypoints
+        self.waypoints = waypoints  # GCJ-02 坐标
         self.speed = speed_mps
         self.total_distance = sum(haversine(waypoints[i][0], waypoints[i][1], waypoints[i+1][0], waypoints[i+1][1]) 
                                    for i in range(len(waypoints)-1)) * 1000
         self.dist_traveled = 0.0
         self.current_index = 0
-        self.current_pos = waypoints[0] if waypoints else None
+        self.current_pos = waypoints[0] if waypoints else None  # GCJ-02
         self.battery_reserve_percent = battery_reserve_percent
         self.start_abs_time = None
         self.pause_start_time = None
@@ -470,11 +455,20 @@ class FlightSimulator:
                     self.dist_traveled = target_dist
                     break
                 dist_accum += seg_dist
+
+        # ✅ 航点到达日志增加剩余航点信息
         if self.current_index > self.last_logged_wp_index:
+            total_wp = len(self.waypoints)
             for wp_idx in range(self.last_logged_wp_index + 1, self.current_index + 1):
+                remaining = total_wp - wp_idx
                 if self.logger:
-                    self.logger.add_log(f"FCU→OBC→GCS: WP_REACHED #{wp_idx}", "FCU", direction="FCU->OBC->GCS")
+                    self.logger.add_log(
+                        f"FCU→OBC→GCS: WP_REACHED #{wp_idx} | 剩余航点: {remaining}/{total_wp}",
+                        "FCU",
+                        direction="FCU->OBC->GCS"
+                    )
             self.last_logged_wp_index = self.current_index
+
         progress = self.dist_traveled / self.total_distance if self.total_distance > 0 else 1
         self.battery_percent = max(0, 100 - progress * (100 - self.battery_reserve_percent))
 
@@ -985,14 +979,16 @@ elif st.session_state.page == "任务执行":
     st.metric("🔋 电量模拟", f"{sim.battery_percent:.0f}%")
     st.progress(progress, text=f"任务进度 {progress*100:.0f}%")
     
-    # ========== 坐标转换：GCJ-02 -> WGS-84 (PyDeck 需要 WGS-84) ==========
-    # 航线点
-    wgs_waypoints = [gcj02_to_wgs84(lon, lat) for (lon, lat) in st.session_state.planned_waypoints]
-    route_lons = [p[0] for p in wgs_waypoints]
-    route_lats = [p[1] for p in wgs_waypoints]
-    route_path = [[lon, lat] for lon, lat in zip(route_lons, route_lats)]
+    # ---------- GCJ-02 转 WGS-84 用于 PyDeck 显示 ----------
+    display_waypoints = []
+    for p in st.session_state.planned_waypoints:
+        lon_w, lat_w = gcj02_to_wgs84(p[0], p[1])
+        display_waypoints.append((lon_w, lat_w))
     
-    # 已飞路径
+    # 航线路径 (WGS-84)
+    route_path = [[lon, lat] for lon, lat in display_waypoints]
+    
+    # 已飞路径 (WGS-84)
     flown_points = []
     if sim.dist_traveled > 0:
         dist_acc = 0.0
@@ -1000,37 +996,40 @@ elif st.session_state.page == "任务执行":
         for i in range(len(waypts)-1):
             seg_dist = haversine(waypts[i][0], waypts[i][1], waypts[i+1][0], waypts[i+1][1]) * 1000
             if dist_acc + seg_dist < sim.dist_traveled - 1e-6:
-                flown_points.append(waypts[i+1])
+                # 完全飞过的点
+                lon_w, lat_w = gcj02_to_wgs84(waypts[i+1][0], waypts[i+1][1])
+                flown_points.append((lon_w, lat_w))
                 dist_acc += seg_dist
             else:
                 t = (sim.dist_traveled - dist_acc) / seg_dist if seg_dist > 0 else 0
-                lon = waypts[i][0] + t * (waypts[i+1][0] - waypts[i][0])
-                lat = waypts[i][1] + t * (waypts[i+1][1] - waypts[i][1])
-                flown_points.append((lon, lat))
+                lon_gcj = waypts[i][0] + t * (waypts[i+1][0] - waypts[i][0])
+                lat_gcj = waypts[i][1] + t * (waypts[i+1][1] - waypts[i][1])
+                lon_w, lat_w = gcj02_to_wgs84(lon_gcj, lat_gcj)
+                flown_points.append((lon_w, lat_w))
                 break
-    flown_wgs = [gcj02_to_wgs84(lon, lat) for (lon, lat) in flown_points]
-    flown_path = [[lon, lat] for lon, lat in flown_wgs]
+    flown_path = [[lon, lat] for lon, lat in flown_points]
     
-    # 障碍物 (存储为 GCJ-02，需转 WGS-84)
+    # 障碍物多边形 (WGS-84)
     obstacle_polygons = []
     for obs in st.session_state.obstacles:
         if obs.get('height', 50) >= st.session_state.flight_altitude:
-            coords_gcj = obs['coordinates']
-            coords_wgs = [gcj02_to_wgs84(lon, lat) for lon, lat in coords_gcj]
-            polygon_coords = [[lon, lat] for lon, lat in coords_wgs]
-            obstacle_polygons.append(polygon_coords)
+            coords_wgs = []
+            for lon, lat in obs['coordinates']:
+                lon_w, lat_w = gcj02_to_wgs84(lon, lat)
+                coords_wgs.append([lon_w, lat_w])
+            obstacle_polygons.append(coords_wgs)
     
-    # 当前无人机位置
+    # 当前无人机位置 (WGS-84)
     current_lon_gcj, current_lat_gcj = sim.current_pos
     current_lon_wgs, current_lat_wgs = gcj02_to_wgs84(current_lon_gcj, current_lat_gcj)
     
-    # 起点终点（从 wgs_waypoints 取）
-    start_wgs = wgs_waypoints[0]
-    end_wgs = wgs_waypoints[-1]
+    # 起点/终点标记 (WGS-84)
+    start_lon_wgs, start_lat_wgs = display_waypoints[0]
+    end_lon_wgs, end_lat_wgs = display_waypoints[-1]
     
     # 构建 PyDeck 图层
     layers = []
-    # 规划航线
+    # 航线
     layers.append(pdk.Layer(
         'PathLayer',
         data=[{'path': route_path}],
@@ -1064,7 +1063,7 @@ elif st.session_state.page == "任务执行":
             line_width_min_pixels=2,
             pickable=True,
         ))
-    # 无人机
+    # 无人机位置
     layers.append(pdk.Layer(
         'ScatterplotLayer',
         data=[{'lon': current_lon_wgs, 'lat': current_lat_wgs}],
@@ -1073,10 +1072,10 @@ elif st.session_state.page == "任务执行":
         get_radius=15,
         pickable=True,
     ))
-    # 起点/终点
+    # 起点终点
     markers = pd.DataFrame([
-        {'lon': start_wgs[0], 'lat': start_wgs[1], 'type': '起点', 'color': [0, 255, 0]},
-        {'lon': end_wgs[0], 'lat': end_wgs[1], 'type': '终点', 'color': [255, 0, 0]}
+        {'lon': start_lon_wgs, 'lat': start_lat_wgs, 'type': 'start', 'color': [0, 255, 0]},
+        {'lon': end_lon_wgs, 'lat': end_lat_wgs, 'type': 'end', 'color': [255, 0, 0]}
     ])
     layers.append(pdk.Layer(
         'ScatterplotLayer',
@@ -1103,6 +1102,10 @@ elif st.session_state.page == "任务执行":
         delay = heart_stats['avg_delay']
         loss = heart_stats['packet_loss_rate']
         st.markdown(link_topology_html(delay, loss), unsafe_allow_html=True)
+
+        # ✅ 实时剩余航点指标
+        remaining_wp_count = total_wp - current_wp
+        st.metric("📍 剩余航点", f"{remaining_wp_count}/{total_wp}")
         
         st.subheader("📜 通信日志")
         log_direction = st.radio(
@@ -1412,11 +1415,10 @@ elif st.session_state.page == "航线规划":
             if output and 'last_active_drawing' in output and output['last_active_drawing']:
                 drawing = output['last_active_drawing']
                 if drawing and drawing.get('geometry', {}).get('type') == 'Polygon':
-                    coords_wgs = drawing['geometry']['coordinates'][0]
-                    # 将 folium 绘制的 WGS-84 坐标转换为 GCJ-02 存储
-                    coords_gcj = [wgs84_to_gcj02(c[0], c[1]) for c in coords_wgs]
+                    coords = drawing['geometry']['coordinates'][0]
+                    coords = [[c[0], c[1]] for c in coords]
                     new_name = f"障碍物_{len(st.session_state.obstacles)+1}"
-                    st.session_state.obstacles.append({"id": str(int(time.time()*1000)), "name": new_name, "coordinates": coords_gcj, "height": 50.0})
+                    st.session_state.obstacles.append({"id": str(int(time.time()*1000)), "name": new_name, "coordinates": coords, "height": 50.0})
                     save_obstacles(st.session_state.obstacles)
                     st.success(f"已添加: {new_name}")
                     st.rerun()
@@ -1485,8 +1487,11 @@ elif st.session_state.page == "坐标系设置":
     if st.button("WGS-84 → GCJ-02"):
         gcj_lon, gcj_lat = wgs84_to_gcj02(test_lon, test_lat)
         st.write(f"GCJ-02: {gcj_lat:.6f}, {gcj_lon:.6f}")
+    if st.button("GCJ-02 → WGS-84"):
+        wgs_lon, wgs_lat = gcj02_to_wgs84(test_lon, test_lat)
+        st.write(f"WGS-84: {wgs_lat:.6f}, {wgs_lon:.6f}")
 
 # ==================== 自动刷新（心跳） ====================
 if st.session_state.running:
     time.sleep(refresh_rate)
-    st.rerun()v
+    st.rerun()
