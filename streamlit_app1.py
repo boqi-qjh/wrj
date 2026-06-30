@@ -19,91 +19,34 @@ AMAP_KEY = "0c475e7a50516001883c104383b43f31"
 BEIJING_TZ = pytz.timezone('Asia/Shanghai')
 OBSTACLE_FILE = "obstacles.json"
 
-# ==================== 坐标转换（核心函数） ====================
-
+# ==================== 坐标转换 ====================
 def wgs84_to_gcj02(lng, lat):
-    """
-    WGS-84 坐标系 → GCJ-02 坐标系（国测局加密坐标系）
-    --------------------------------------------------
-    中国大陆所有公开地图（高德、腾讯、谷歌中国）必须使用 GCJ-02，
-    因此需要将 GPS 原始坐标（WGS-84）转换为 GCJ-02 才能正确叠加地图。
-    本函数采用标准偏移算法，精度在 1 米以内。
-    
-    参数：
-        lng : float  – 经度（度）
-        lat : float  – 纬度（度）
-    返回：
-        (mglng, mglat) – GCJ-02 坐标（度）
-    """
-    # 常量定义：克拉克椭球参数（a 为长半轴，ee 为第一偏心率的平方）
     a = 6378245.0
     ee = 0.00669342162296594323
-
-    # ---------- 内部辅助函数：纬度偏移量 ----------
     def transform_lat(x, y):
-        """计算纬度方向上的偏移量（单位：度）"""
         ret = -100.0 + 2.0 * x + 3.0 * y + 0.2 * y * y + 0.1 * x * y + 0.2 * abs(x)
         ret += (20.0 * sin(6.0 * x * pi) + 20.0 * sin(2.0 * x * pi)) * 2.0 / 3.0
         ret += (20.0 * sin(y * pi) + 40.0 * sin(y / 3.0 * pi)) * 2.0 / 3.0
         ret += (160.0 * sin(y / 12.0 * pi) + 320 * sin(y * pi / 30.0)) * 2.0 / 3.0
         return ret
-
-    # ---------- 内部辅助函数：经度偏移量 ----------
     def transform_lng(x, y):
-        """计算经度方向上的偏移量（单位：度）"""
         ret = 300.0 + x + 2.0 * y + 0.1 * x * x + 0.1 * x * y + 0.1 * abs(x)
         ret += (20.0 * sin(6.0 * x * pi) + 20.0 * sin(2.0 * x * pi)) * 2.0 / 3.0
         ret += (20.0 * sin(x * pi) + 40.0 * sin(x / 3.0 * pi)) * 2.0 / 3.0
         ret += (150.0 * sin(x / 12.0 * pi) + 300.0 * sin(x / 30.0 * pi)) * 2.0 / 3.0
         return ret
-
-    # 1. 计算两个方向上的原始偏移量（基于经纬度与基准点的差值）
     dlat = transform_lat(lng - 105.0, lat - 35.0)
     dlng = transform_lng(lng - 105.0, lat - 35.0)
-
-    # 2. 将偏移量从“度”转换为“实际距离偏移”（考虑椭球曲率）
     radlat = lat / 180.0 * pi
     magic = sin(radlat)
     magic = 1 - ee * magic * magic
     sqrtmagic = sqrt(magic)
     dlat = (dlat * 180.0) / ((a * (1 - ee)) / (magic * sqrtmagic) * pi)
     dlng = (dlng * 180.0) / (a / sqrtmagic * cos(radlat) * pi)
-
-    # 3. 将偏移量叠加到原始坐标上，得到 GCJ-02 坐标
     mglat = lat + dlat
     mglng = lng + dlng
     return mglng, mglat
 
-
-def gcj02_to_wgs84(lng, lat):
-    """
-    GCJ-02 坐标系 → WGS-84 坐标系（反算）
-    -------------------------------------------
-    当需要将地图上的坐标（GCJ-02）还原为 GPS 原始坐标时使用。
-    由于 GCJ-02 加密非线性，无法直接求逆，故采用迭代逼近法。
-    迭代 5 次即可获得厘米级精度，满足工程需求。
-
-    参数：
-        lng : float  – GCJ-02 经度（度）
-        lat : float  – GCJ-02 纬度（度）
-    返回：
-        (wgs_lng, wgs_lat) – WGS-84 坐标（度）
-    """
-    wgs_lng, wgs_lat = lng, lat   # 初始值设为 GCJ-02 坐标
-    # 迭代 5 次，每次将当前 WGS-84 坐标转为 GCJ-02，并与输入值比较，修正差值
-    for _ in range(5):
-        # 将当前 WGS-84 坐标转换为 GCJ-02（正向转换）
-        gcj_lng, gcj_lat = wgs84_to_gcj02(wgs_lng, wgs_lat)
-        # 计算转换后的 GCJ-02 与目标 GCJ-02 的差值
-        delta_lng = gcj_lng - lng
-        delta_lat = gcj_lat - lat
-        # 用差值反向修正 WGS-84 坐标（负反馈）
-        wgs_lng -= delta_lng
-        wgs_lat -= delta_lat
-        # 若修正量足够小，提前终止迭代
-        if abs(delta_lng) < 1e-7 and abs(delta_lat) < 1e-7:
-            break
-    return wgs_lng, wgs_lat
 def gcj02_to_wgs84(lng, lat):
     """GCJ-02 → WGS-84 迭代法（足够精度）"""
     lng_wgs, lat_wgs = lng, lat
@@ -800,7 +743,7 @@ if "planned_waypoints" not in st.session_state:
 if "battery_reserve_percent" not in st.session_state:
     st.session_state.battery_reserve_percent = 80
 if "map_refresh_interval_ms" not in st.session_state:
-    st.session_state.map_refresh_interval_ms = 300  # 默认 300ms（平衡性能）
+    st.session_state.map_refresh_interval_ms = 200
 if "comm_logger" not in st.session_state:
     st.session_state.comm_logger = CommunicationLogger(maxlen=100)
 
@@ -944,9 +887,6 @@ if st.session_state.page == "心跳监控":
 # ==================== 页面2：任务执行 ====================
 elif st.session_state.page == "任务执行":
     st.header("✈️ 飞行实时画面 - 任务执行监控")
-    
-    # 创建地图占位符（用于高频更新）
-    map_placeholder = st.empty()
     
     refresh_ms = st.slider("🖼️ 地图刷新间隔（毫秒）", min_value=50, max_value=500, value=st.session_state.map_refresh_interval_ms, step=10,
                            help="间隔越小，画面越流畅。建议 100-200ms。")
@@ -1154,9 +1094,7 @@ elif st.session_state.page == "任务执行":
     map_col, topo_col = st.columns([2, 1])
     with map_col:
         st.subheader("实时飞行地图（自动跟随，PyDeck 高速渲染）")
-        # 修改：将地图放入占位符并添加固定 key
-        with map_placeholder.container():
-            st.pydeck_chart(r, use_container_width=True, key="flight_map_deck")
+        st.pydeck_chart(r, use_container_width=True)
     
     with topo_col:
         st.subheader("📡 通信链路拓扑与数据流")
